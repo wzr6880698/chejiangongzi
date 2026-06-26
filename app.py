@@ -161,32 +161,51 @@ class WorkshopDataExtractor:
             for cluster in clusters:
                 min_col = min(cluster)
                 max_col_cluster = max(cluster)
-                center_col = (min_col + max_col_cluster) // 2
 
-                # ---- 独立查找姓名列（在当前簇范围内搜索） ----
+                # ---- 独立查找姓名列（精确搜索） ----
                 name_col = None
-                search_radius_col_name = 3  # 在簇左右扩展3列
+                # 首先在簇列范围左右扩展5列内搜索
+                left_bound = max(1, min_col - 5)
+                right_bound = min(max_col, max_col_cluster + 5)
                 for r in range(header_row, max(1, header_row - 5), -1):
-                    for c in range(max(1, min_col - search_radius_col_name),
-                                   min(max_col, max_col_cluster + search_radius_col_name + 1)):
+                    for c in range(left_bound, right_bound + 1):
                         cell = ws.cell(r, c)
-                        if cell.value and isinstance(cell.value, str) and cell.value.strip() == "姓名":
-                            name_col = c
-                            break
+                        if cell.value and isinstance(cell.value, str):
+                            val = cell.value.strip()
+                            if val == "姓名":
+                                name_col = c
+                                break
                     if name_col:
                         break
-                # 如果簇内未找到，回退到全局搜索
-                if name_col is None:
+                # 若未找到，尝试在左邻列（min_col-1）
+                if name_col is None and min_col - 1 >= 1:
                     for r in range(header_row, max(1, header_row - 5), -1):
-                        for c in range(1, max_col + 1):
+                        cell = ws.cell(r, min_col - 1)
+                        if cell.value and isinstance(cell.value, str) and cell.value.strip() == "姓名":
+                            name_col = min_col - 1
+                            break
+                # 若还未找到，尝试在右邻列（max_col_cluster+1）
+                if name_col is None and max_col_cluster + 1 <= max_col:
+                    for r in range(header_row, max(1, header_row - 5), -1):
+                        cell = ws.cell(r, max_col_cluster + 1)
+                        if cell.value and isinstance(cell.value, str) and cell.value.strip() == "姓名":
+                            name_col = max_col_cluster + 1
+                            break
+                # 最后，若仍找不到，回退到全局搜索，但限定列范围在块附近（左右10列）
+                if name_col is None:
+                    left_global = max(1, min_col - 10)
+                    right_global = min(max_col, max_col_cluster + 10)
+                    for r in range(header_row, max(1, header_row - 5), -1):
+                        for c in range(left_global, right_global + 1):
                             cell = ws.cell(r, c)
                             if cell.value and isinstance(cell.value, str) and cell.value.strip() == "姓名":
                                 name_col = c
                                 break
                         if name_col:
                             break
+                # 如果仍然没有，默认B列
                 if name_col is None:
-                    name_col = 2  # 默认B列
+                    name_col = 2
 
                 # ---- 为当前块搜索公共元数据（日期、批次号、产品名称） ----
                 search_radius_row = 3
