@@ -8,6 +8,7 @@ from io import BytesIO
 import tempfile
 from collections import defaultdict
 
+
 # ============================
 # 工具类
 # ============================
@@ -72,7 +73,7 @@ class DataValidator:
 
 
 # ============================
-# 核心提取器（智能四向搜索）
+# 核心提取器
 # ============================
 class WorkshopDataExtractor:
     def __init__(self, sheet_name):
@@ -90,13 +91,43 @@ class WorkshopDataExtractor:
             total += self._extract_block_data(ws, block, data_list)
         return total > 0
 
+    def _get_value_from_label(self, ws, label_row, label_col, max_row, max_col):
+        """
+        根据关键词所在的单元格，智能获取其对应的值。
+        策略：
+        1. 检查右侧单元格，若右侧非空且不是另一个标签，则取右侧。
+        2. 否则，检查下方单元格，取下方。
+        """
+        label_keywords = {
+            "批次号", "批号", "产品名称", "品名", "日期", "生产日期",
+            "姓名", "数量", "单价", "金额", "备注", "序号", "合计"
+        }
+
+        # 检查右侧
+        right_cell = ws.cell(label_row, label_col + 1) if label_col + 1 <= max_col else None
+        if right_cell and right_cell.value is not None:
+            right_val = right_cell.value
+            if isinstance(right_val, str):
+                right_val = right_val.strip()
+            if right_val and right_val not in label_keywords:
+                return str(right_val)
+
+        # 检查下方
+        down_cell = ws.cell(label_row + 1, label_col) if label_row + 1 <= max_row else None
+        if down_cell and down_cell.value is not None:
+            down_val = down_cell.value
+            if isinstance(down_val, str):
+                down_val = down_val.strip()
+            if down_val and str(down_val).strip() != "":
+                return str(down_val)
+
+        return None
+
     def _find_header_blocks(self, ws):
-        """找出所有表头块，并智能搜索元数据（四向）"""
         blocks = []
         max_row = ws.max_row
         max_col = ws.max_column
 
-        # 找出所有"数量"单元格
         quantity_cells = []
         for r in range(1, max_row + 1):
             for c in range(1, max_col + 1):
@@ -112,7 +143,7 @@ class WorkshopDataExtractor:
             rows_with_q[r].append(c)
 
         for header_row, q_cols in sorted(rows_with_q.items()):
-            # --- 1. 查找姓名列（在表头区域搜索“姓名”）---
+            # 查找姓名列
             name_col = None
             for r in range(header_row, max(1, header_row - 5), -1):
                 for c in range(1, max_col + 1):
@@ -123,19 +154,14 @@ class WorkshopDataExtractor:
                 if name_col:
                     break
             if name_col is None:
-                name_col = 2  # 默认B列
+                name_col = 2
 
-            # --- 2. 为整个块提取公共元数据（日期、批次号、产品名称）---
-            # 定义搜索范围：以 header_row 为中心，上下3行，左右5列
+            # 公共元数据
             search_radius_row = 3
             search_radius_col = 5
-            block_metadata = {
-                'date': None,
-                'batch': None,
-                'product': None
-            }
+            block_metadata = {'date': None, 'batch': None, 'product': None}
 
-            # 先搜索公共日期（关键词“日期”或“生产日期”）
+            # 日期
             for r in range(header_row - search_radius_row, header_row + search_radius_row + 1):
                 if r < 1 or r > max_row:
                     continue
@@ -144,10 +170,9 @@ class WorkshopDataExtractor:
                     if cell.value and isinstance(cell.value, str):
                         val = cell.value.strip()
                         if val in ["日期", "生产日期"]:
-                            # 取右侧单元格的值
-                            right_cell = ws.cell(r, c + 1)
-                            if right_cell.value is not None:
-                                parsed = DateParser.parse(right_cell.value)
+                            value_str = self._get_value_from_label(ws, r, c, max_row, max_col)
+                            if value_str:
+                                parsed = DateParser.parse(value_str)
                                 if parsed:
                                     block_metadata['date'] = parsed
                                     break
@@ -156,12 +181,11 @@ class WorkshopDataExtractor:
                 if block_metadata['date']:
                     break
 
-            # 如果公共日期没找到，尝试从A列或左上角找日期值
             if not block_metadata['date']:
                 for r in range(header_row - search_radius_row, header_row + search_radius_row + 1):
                     if r < 1 or r > max_row:
                         continue
-                    for c in range(1, 6):  # A-E列
+                    for c in range(1, 6):
                         cell = ws.cell(r, c)
                         if cell.value:
                             parsed = DateParser.parse(cell.value)
@@ -171,7 +195,7 @@ class WorkshopDataExtractor:
                     if block_metadata['date']:
                         break
 
-            # 搜索公共批次号（关键词“批次号”或“批号”）
+            # 批次号
             for r in range(header_row - search_radius_row, header_row + search_radius_row + 1):
                 if r < 1 or r > max_row:
                     continue
@@ -180,16 +204,16 @@ class WorkshopDataExtractor:
                     if cell.value and isinstance(cell.value, str):
                         val = cell.value.strip()
                         if val in ["批次号", "批号"]:
-                            right_cell = ws.cell(r, c + 1)
-                            if right_cell.value is not None:
-                                block_metadata['batch'] = str(right_cell.value).strip()
+                            value_str = self._get_value_from_label(ws, r, c, max_row, max_col)
+                            if value_str:
+                                block_metadata['batch'] = value_str
                                 break
                     if block_metadata['batch']:
                         break
                 if block_metadata['batch']:
                     break
 
-            # 搜索公共产品名称（关键词“产品名称”或“品名”）
+            # 产品名称
             for r in range(header_row - search_radius_row, header_row + search_radius_row + 1):
                 if r < 1 or r > max_row:
                     continue
@@ -198,26 +222,23 @@ class WorkshopDataExtractor:
                     if cell.value and isinstance(cell.value, str):
                         val = cell.value.strip()
                         if val in ["产品名称", "品名"]:
-                            right_cell = ws.cell(r, c + 1)
-                            if right_cell.value is not None:
-                                block_metadata['product'] = str(right_cell.value).strip()
+                            value_str = self._get_value_from_label(ws, r, c, max_row, max_col)
+                            if value_str:
+                                block_metadata['product'] = value_str
                                 break
                     if block_metadata['product']:
                         break
                 if block_metadata['product']:
                     break
 
-            # --- 3. 处理每个数量列，生成产品块 ---
+            # 处理每个数量列
             product_blocks = []
             for q_col in sorted(q_cols):
-                # 默认使用公共元数据，如果缺失则针对该数量列单独搜索
                 batch = block_metadata['batch'] if block_metadata['batch'] is not None else "0"
                 product = block_metadata['product'] if block_metadata['product'] is not None else f"产品{q_col}"
                 date_val = block_metadata['date']
 
-                # 如果公共批次号缺失，针对该数量列局部搜索
                 if block_metadata['batch'] is None:
-                    # 以 (header_row, q_col) 为中心，上下3行，左右3列
                     for r in range(header_row - 2, header_row + 3):
                         if r < 1 or r > max_row:
                             continue
@@ -226,15 +247,13 @@ class WorkshopDataExtractor:
                             if cell.value and isinstance(cell.value, str):
                                 val = cell.value.strip()
                                 if val in ["批次号", "批号"]:
-                                    # 取右侧值
-                                    right_cell = ws.cell(r, c + 1)
-                                    if right_cell.value is not None:
-                                        batch = str(right_cell.value).strip()
+                                    value_str = self._get_value_from_label(ws, r, c, max_row, max_col)
+                                    if value_str:
+                                        batch = value_str
                                         break
                         if batch != "0":
                             break
 
-                # 如果公共产品名缺失，局部搜索
                 if block_metadata['product'] is None:
                     for r in range(header_row - 2, header_row + 3):
                         if r < 1 or r > max_row:
@@ -244,9 +263,9 @@ class WorkshopDataExtractor:
                             if cell.value and isinstance(cell.value, str):
                                 val = cell.value.strip()
                                 if val in ["产品名称", "品名"]:
-                                    right_cell = ws.cell(r, c + 1)
-                                    if right_cell.value is not None:
-                                        product = str(right_cell.value).strip()
+                                    value_str = self._get_value_from_label(ws, r, c, max_row, max_col)
+                                    if value_str:
+                                        product = value_str
                                         break
                         if product != f"产品{q_col}":
                             break
@@ -261,7 +280,7 @@ class WorkshopDataExtractor:
                     'note_col': note_col,
                     'batch': batch,
                     'product': product,
-                    'date': date_val   # 每个产品块可带日期（如果不同）
+                    'date': date_val
                 })
 
             blocks.append({
@@ -279,7 +298,6 @@ class WorkshopDataExtractor:
 
         start_row = header_row + 1
         end_row = ws.max_row
-        # 查找下一个表头行（含“数量”的行），作为结束
         for r in range(start_row, ws.max_row + 1):
             for c in range(1, ws.max_column + 1):
                 cell = ws.cell(r, c)
@@ -331,10 +349,8 @@ class WorkshopDataExtractor:
                         pass
 
                 if has_data:
-                    # 日期：优先使用产品块自带的日期，若没有则使用默认（从当前行或A列查找）
                     date_val = pb.get('date')
                     if not date_val:
-                        # 尝试从当前行查找日期（如A列）
                         for c in range(1, 6):
                             cell = ws.cell(row_idx, c)
                             if cell.value:
@@ -343,7 +359,6 @@ class WorkshopDataExtractor:
                                     date_val = parsed
                                     break
                     if not date_val:
-                        # 尝试从块上方查找
                         for r in range(header_row, max(1, header_row - 10), -1):
                             cell = ws.cell(r, 1)
                             if cell.value:
@@ -380,8 +395,10 @@ class WorkshopDataExtractor:
 class RaorouExtractor(WorkshopDataExtractor):
     pass
 
+
 class ZhizuoExtractor(WorkshopDataExtractor):
     pass
+
 
 class BaozhuangExtractor(WorkshopDataExtractor):
     pass
@@ -413,13 +430,15 @@ def save_to_output(data_list):
 # Streamlit 界面
 # ============================
 def main():
-    st.set_page_config(page_title="车间日报提取工具（四向智能搜索）", layout="wide")
-    st.title("🏭 车间生产日报数据处理系统（四向智能搜索）")
+    st.set_page_config(page_title="车间日报提取工具（智能值定位）", layout="wide")
+    st.title("🏭 车间生产日报数据处理系统（智能值定位）")
     st.markdown("""
     **使用说明：**
     - 上传车间日报表文件（支持 .xlsx, .xls）。
-    - 系统会自动识别所有数据块，并以“数量”单元格为中心向四周搜索元数据（日期、批次号、产品名称）。
-    - 支持一行、两行、三行及任意行表头。
+    - 系统自动识别数据块，寻找关键词后：
+        - 若右侧单元格不是标签，则取右侧值（二行/三行表头）；
+        - 否则取下方单元格值（一行表头）。
+    - 兼容一行、两行、三行及任意行表头。
     - 支持多文件批量处理，结果汇总下载。
     """)
     st.markdown("---")
@@ -446,7 +465,8 @@ def main():
                     st.info(f"⏭️ 文件 '{uploaded_file.name}' 不包含关键字，已跳过。")
                     continue
                 try:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp:
+                    with tempfile.NamedTemporaryFile(delete=False,
+                                                     suffix=os.path.splitext(uploaded_file.name)[1]) as tmp:
                         tmp.write(uploaded_file.getbuffer())
                         tmp_path = tmp.name
                     wb = load_workbook(tmp_path, data_only=True)
@@ -477,6 +497,7 @@ def main():
                 )
             else:
                 st.warning("⚠️ 未能提取到任何数据，请检查文件格式。")
+
 
 if __name__ == "__main__":
     main()
