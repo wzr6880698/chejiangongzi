@@ -6,10 +6,9 @@ import re
 import streamlit as st
 from io import BytesIO
 import tempfile
-import pandas as pd
 
 # ============================
-# 工具类
+# 工具类（不变）
 # ============================
 class DateParser:
     @staticmethod
@@ -72,20 +71,15 @@ class DataValidator:
 
 
 # ============================
-# 基础提取器（支持多表头块）
+# 核心提取器（智能块识别）
 # ============================
 class WorkshopDataExtractor:
     def __init__(self, sheet_name):
         self.sheet_name = sheet_name
 
-    def extract(self, ws, data_list, manual_config=None):
-        if manual_config:
-            self._extract_with_manual_config(ws, data_list, manual_config)
-        else:
-            # 动态解析多表头块
-            success = self._try_dynamic_extract(ws, data_list)
-            if not success:
-                self._fallback_extract(ws, data_list)
+    def extract(self, ws, data_list):
+        """主入口：扫描整个工作表，识别所有块并提取"""
+        self._try_dynamic_extract(ws, data_list)
 
     def _try_dynamic_extract(self, ws, data_list):
         """扫描整个工作表，识别所有表头块并提取数据"""
@@ -94,33 +88,21 @@ class WorkshopDataExtractor:
             return False
 
         total_records = 0
-        # 对每个块处理
         for block in header_blocks:
-            # 提取该块的数据
             records = self._extract_block_data(ws, block, data_list)
             total_records += records
         return total_records > 0
 
     def _find_header_blocks(self, ws):
         """
-        查找所有表头块。
-        返回列表，每个元素为dict:
-        {
-            'header_row': 行号（1-based）,
-            'date_col': 日期列索引（1-based）或None,
-            'name_col': 姓名列索引,
-            'batch_col': 批次号列索引或None,
-            'product_col': 产品名列索引或None,  # 如果产品名每块固定，可从上方解析
-            'blocks': [  # 产品块列表
-                {'q_col': 数量列, 'price_col': 单价列, 'amount_col': 金额列, 'note_col': 备注列, 'batch': 批次号, 'product': 产品名称}
-            ]
-        }
+        查找所有包含“数量”关键字的表头行，每个这样的行作为一个块的起始。
+        返回块列表，每个块包含：表头行号、姓名列、日期列、产品块列表（含批次号、产品名、各列索引）。
         """
         blocks = []
         max_row = ws.max_row
         max_col = ws.max_column
 
-        # 第一步：找出所有包含"数量"的单元格（行，列）
+        # 找出所有包含"数量"的单元格（行，列）
         quantity_cells = []
         for r in range(1, max_row + 1):
             for c in range(1, max_col + 1):
@@ -139,48 +121,43 @@ class WorkshopDataExtractor:
         for r, c in quantity_cells:
             rows_with_q[r].append(c)
 
-        # 对每个出现"数量"的行，构造一个表头块
+        # 对每个出现"数量"的行，构造一个块
         for header_row, q_cols in sorted(rows_with_q.items()):
-            # 查找该行上的其他关键字段（日期、姓名、批次号、产品名称）
-            # 注意：这些字段可能不在同一行，向上搜索
-            date_col = None
+            # 查找姓名列（优先在本行找“姓名”，否则向上找，默认B列）
             name_col = None
-            # 先查看该行是否有"日期"、"姓名"等关键词
-            for c in range(1, max_col + 1):
-                cell = ws.cell(header_row, c)
-                if cell.value and isinstance(cell.value, str):
-                    val = cell.value.strip()
-                    if val == "日期":
-                        date_col = c
-                    elif val == "姓名":
+            for r in range(header_row, max(1, header_row - 5), -1):
+                for c in range(1, max_col + 1):
+                    cell = ws.cell(r, c)
+                    if cell.value and isinstance(cell.value, str) and cell.value.strip() == "姓名":
                         name_col = c
-            # 若姓名列未找到，默认B列（常见）
-            if name_col is None:
-                # 尝试从上一行找"姓名"
-                for r in range(header_row - 1, max(1, header_row - 5), -1):
-                    for c in range(1, max_col + 1):
-                        cell = ws.cell(r, c)
-                        if cell.value and isinstance(cell.value, str) and cell.value.strip() == "姓名":
-                            name_col = c
-                            break
-                    if name_col:
                         break
+                if name_col:
+                    break
             if name_col is None:
                 name_col = 2  # 默认B列
+
+            # 查找日期列（优先本行“日期”，否则向上找）
+            date_col = None
+            for r in range(header_row, max(1, header_row - 10), -1):
+                for c in range(1, max_col + 1):
+                    cell = ws.cell(r, c)
+                    if cell.value and isinstance(cell.value, str) and cell.value.strip() == "日期":
+                        date_col = c
+                        break
+                if date_col:
+                    break
 
             # 处理每个数量列，生成产品块
             product_blocks = []
             for q_col in sorted(q_cols):
-                # 向上查找批次号和产品名称（可能在当前行或上方行）
                 batch = "0"
                 product = f"产品{q_col}"
-                # 向上扫描最多5行
+                # 向上查找批次号和产品名称（最多5行）
                 for r in range(header_row, max(1, header_row - 5), -1):
                     cell_val = ws.cell(r, q_col).value
                     if cell_val and isinstance(cell_val, str):
                         val = cell_val.strip()
                         if val in ["批次号", "批号"]:
-                            # 批次号值在右侧列
                             batch_cell = ws.cell(r, q_col + 1)
                             if batch_cell.value is not None:
                                 batch = str(batch_cell.value).strip()
@@ -188,11 +165,10 @@ class WorkshopDataExtractor:
                             prod_cell = ws.cell(r, q_col + 1)
                             if prod_cell.value is not None:
                                 product = str(prod_cell.value).strip()
-                # 确定其他字段列（默认紧随其后）
+                # 后续列默认为单价、金额、备注
                 price_col = q_col + 1
                 amount_col = q_col + 2
                 note_col = q_col + 3
-                # 但也要检查是否确实有"单价"等标签，如果没有，可能列顺序不同？暂信任顺序
                 product_blocks.append({
                     'q_col': q_col,
                     'price_col': price_col,
@@ -204,25 +180,24 @@ class WorkshopDataExtractor:
 
             blocks.append({
                 'header_row': header_row,
-                'date_col': date_col,
                 'name_col': name_col,
+                'date_col': date_col,
                 'product_blocks': product_blocks
             })
 
         return blocks
 
     def _extract_block_data(self, ws, block, data_list):
-        """从给定块中提取数据，添加到data_list"""
+        """从给定块中提取数据"""
         header_row = block['header_row']
         name_col = block['name_col']
         date_col = block.get('date_col')
         product_blocks = block['product_blocks']
 
-        # 确定数据起始行（表头下一行）
+        # 数据起始行 = 表头行 + 1
         start_row = header_row + 1
-        # 查找下一个表头行（即下一个包含"数量"的行），作为结束行
+        # 查找下一个表头行（即下一个包含“数量”的行），作为结束行
         end_row = ws.max_row
-        # 可以简单扫描后续行，若某行有"数量"且行号大于header_row，则作为结束
         for r in range(start_row, ws.max_row + 1):
             for c in range(1, ws.max_column + 1):
                 cell = ws.cell(r, c)
@@ -232,13 +207,22 @@ class WorkshopDataExtractor:
             if end_row != ws.max_row:
                 break
 
+        # 尝试从块上方获取默认日期（如A列的日期）
+        default_date = None
+        for r in range(header_row, max(1, header_row - 10), -1):
+            cell = ws.cell(r, 1)
+            if cell.value:
+                parsed = DateParser.parse(cell.value)
+                if parsed:
+                    default_date = parsed
+                    break
+
         records_added = 0
         for row_idx in range(start_row, end_row + 1):
             row = ws[row_idx]
-            # 姓名列必须有效
             if name_col > len(row):
                 continue
-            name_cell = row[name_col - 1]  # row是元组，索引0-based
+            name_cell = row[name_col - 1]
             if not (name_cell.value and DataValidator.is_valid_name(name_cell.value)):
                 continue
             name = str(name_cell.value).strip()
@@ -255,7 +239,7 @@ class WorkshopDataExtractor:
                 amount = row[amount_col].value if amount_col < len(row) else None
                 note = row[note_col].value if note_col < len(row) else ""
 
-                # 判断是否有数据
+                # 判断是否有数据（数量或金额非空且有效）
                 has_data = False
                 if qty is not None:
                     try:
@@ -277,21 +261,13 @@ class WorkshopDataExtractor:
                         pass
 
                 if has_data:
-                    # 获取日期：优先从行中日期列读取，否则尝试从表头区域读取日期
+                    # 获取日期：优先从行中日期列读取，否则使用默认日期
                     date_val = None
                     if date_col is not None and date_col <= len(row):
                         date_val = DateParser.parse(row[date_col - 1].value)
                     if not date_val:
-                        # 尝试从块上方查找日期（比如A列）
-                        for r in range(header_row, max(1, header_row - 10), -1):
-                            cell = ws.cell(r, 1)
-                            if cell.value:
-                                parsed = DateParser.parse(cell.value)
-                                if parsed:
-                                    date_val = parsed
-                                    break
+                        date_val = default_date
                     if not date_val:
-                        # 默认使用今天
                         date_val = datetime.now().strftime("%Y/%m/%d")
 
                     record = {
@@ -313,102 +289,9 @@ class WorkshopDataExtractor:
                         records_added += 1
         return records_added
 
-    def _fallback_extract(self, ws, data_list):
-        """子类可重写"""
-        pass
-
-    def _extract_with_manual_config(self, ws, data_list, config):
-        """手动配置提取（单块模式，不处理多表头）"""
-        header_row = config['header_row']
-        data_start = config['data_start_row']
-        date_col = config.get('date_col')
-        name_col = config.get('name_col')
-        batch_col = config.get('batch_col')
-        product_col = config.get('product_col')
-        qty_col = config.get('qty_col')
-        price_col = config.get('price_col')
-        amount_col = config.get('amount_col')
-        note_col = config.get('note_col')
-
-        # 尝试从顶部获取日期
-        default_date = None
-        for r in range(1, 11):
-            for c in range(1, 6):
-                cell = ws.cell(r, c)
-                if cell.value:
-                    parsed = DateParser.parse(cell.value)
-                    if parsed:
-                        default_date = parsed
-                        break
-            if default_date:
-                break
-
-        for row_idx in range(data_start, ws.max_row + 1):
-            row = ws[row_idx]
-            if name_col is not None and name_col < len(row):
-                name_val = row[name_col].value
-                if not DataValidator.is_valid_name(name_val):
-                    continue
-                name = str(name_val).strip()
-            else:
-                continue
-
-            batch = "0"
-            if batch_col is not None and batch_col < len(row):
-                batch = str(row[batch_col].value).strip() if row[batch_col].value else "0"
-            product = ""
-            if product_col is not None and product_col < len(row):
-                product = str(row[product_col].value).strip() if row[product_col].value else ""
-            if not product:
-                continue
-
-            qty = row[qty_col].value if qty_col is not None and qty_col < len(row) else 0
-            price = row[price_col].value if price_col is not None and price_col < len(row) else 0
-            amount = row[amount_col].value if amount_col is not None and amount_col < len(row) else 0
-            note = row[note_col].value if note_col is not None and note_col < len(row) else ""
-
-            has_data = False
-            if qty is not None:
-                try:
-                    if str(qty).strip() != "" and DataValidator.is_valid_number(qty):
-                        has_data = True
-                except:
-                    pass
-            if not has_data and amount is not None:
-                try:
-                    if str(amount).strip() != "" and DataValidator.is_valid_number(amount):
-                        has_data = True
-                except:
-                    pass
-            if not has_data and note:
-                has_data = True
-
-            if has_data:
-                date_val = None
-                if date_col is not None and date_col < len(row):
-                    date_val = DateParser.parse(row[date_col].value)
-                if not date_val:
-                    date_val = default_date
-                record = {
-                    "日期": date_val,
-                    "姓名": name,
-                    "批次号": batch,
-                    "产品名称": product,
-                    "数量": float(qty) if qty is not None and DataValidator.is_valid_number(qty) else 0,
-                    "计量单位": "",
-                    "单价": float(price) if price is not None and DataValidator.is_valid_number(price) else 0,
-                    "金额": float(amount) if amount is not None and DataValidator.is_valid_number(amount) else 0,
-                    "车间名称": self.sheet_name,
-                    "备注": str(note) if note is not None else ""
-                }
-                if record["金额"] == 0 and record["数量"] and record["单价"]:
-                    record["金额"] = record["数量"] * record["单价"]
-                if DataValidator.validate_record(record):
-                    data_list.append(record)
-
 
 # ============================
-# 车间专用提取器（可继承，但当前动态提取已通用）
+# 车间专用提取器（直接继承基类）
 # ============================
 class RaorouExtractor(WorkshopDataExtractor):
     pass
@@ -417,12 +300,11 @@ class ZhizuoExtractor(WorkshopDataExtractor):
     pass
 
 class BaozhuangExtractor(WorkshopDataExtractor):
-    # 包装可保留固定块逻辑，但动态解析也能处理，故留空
     pass
 
 
 # ============================
-# 工具函数：保存结果
+# 保存结果
 # ============================
 def save_to_output(data_list):
     if not data_list:
@@ -447,13 +329,12 @@ def save_to_output(data_list):
 # Streamlit 界面
 # ============================
 def main():
-    st.set_page_config(page_title="车间日报提取工具（多表头自适应）", layout="wide")
-    st.title("🏭 车间生产日报数据处理系统（多表头自适应）")
+    st.set_page_config(page_title="车间日报提取工具（智能块识别）", layout="wide")
+    st.title("🏭 车间生产日报数据处理系统（智能块识别）")
     st.markdown("""
     **使用说明：**
     - 上传车间日报表文件（支持 .xlsx, .xls）。
-    - 系统会自动识别所有表头块（每天独立表头），并提取数据。
-    - 若自动识别不理想，可勾选 **“手动配置字段映射”** 进行列指定。
+    - 系统会自动识别所有数据块（每个“数量”关键词为一个块起点），提取每个工人的各产品产量。
     - 支持多文件批量处理，结果汇总下载。
     """)
     st.markdown("---")
@@ -464,26 +345,7 @@ def main():
         accept_multiple_files=True
     )
 
-    # 如果上传了文件，加载预览数据（第一个文件的第一个工作表）
-    if uploaded_files and 'preview_df' not in st.session_state:
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
-                tmp.write(uploaded_files[0].getbuffer())
-                tmp_path = tmp.name
-            wb = load_workbook(tmp_path, data_only=True)
-            sheet = wb.active
-            data_rows = []
-            for row in sheet.iter_rows(max_row=20, values_only=True):
-                data_rows.append(row)
-            df = pd.DataFrame(data_rows)
-            st.session_state.preview_df = df
-            wb.close()
-            os.unlink(tmp_path)
-        except Exception as e:
-            st.error(f"预览加载失败: {e}")
-
-    # 自动处理按钮
-    if st.button("🚀 开始自动处理", type="primary"):
+    if st.button("🚀 开始处理", type="primary"):
         if not uploaded_files:
             st.warning("⚠️ 请先上传至少一个文件！")
         else:
@@ -505,7 +367,7 @@ def main():
                     wb = load_workbook(tmp_path, data_only=True)
                     for sheet_name in wb.sheetnames:
                         ws = wb[sheet_name]
-                        # 根据车间名选择提取器（但动态提取通用，可不区分）
+                        # 根据车间名选择提取器（目前都使用通用基类）
                         if "绕肉" in sheet_name:
                             extractor = RaorouExtractor(sheet_name)
                         elif "制作" in sheet_name:
@@ -521,8 +383,7 @@ def main():
                     st.error(f"❌ 处理文件 {uploaded_file.name} 时发生错误: {str(e)}")
 
             if all_data:
-                st.success(f"✅ 自动处理完成！共提取 **{len(all_data)}** 条记录。")
-                st.session_state.all_data = all_data
+                st.success(f"✅ 处理完成！共提取 **{len(all_data)}** 条记录。")
                 output_buffer = save_to_output(all_data)
                 st.download_button(
                     label="📥 下载结果文件 (生产车间统计数据收集.xlsx)",
@@ -531,73 +392,7 @@ def main():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             else:
-                st.warning("⚠️ 自动提取未获得任何数据，请尝试手动配置。")
-
-    # 手动配置区域（始终显示）
-    st.markdown("---")
-    with st.expander("🔧 手动配置字段映射（高级）", expanded=False):
-        st.info("若自动提取不理想，请根据下方预览数据指定各字段的列索引（从0开始）。")
-        if 'preview_df' in st.session_state:
-            st.dataframe(st.session_state.preview_df)
-            col1, col2 = st.columns(2)
-            with col1:
-                header_row = st.number_input("表头所在行（0-based）", min_value=0, value=0, step=1)
-                data_start_row = st.number_input("数据起始行（0-based）", min_value=0, value=1, step=1)
-            with col2:
-                date_col = st.number_input("日期列索引（-1表示无）", min_value=-1, value=-1, step=1)
-                name_col = st.number_input("姓名列索引", min_value=0, value=1, step=1)
-                batch_col = st.number_input("批次号列索引（-1表示无）", min_value=-1, value=-1, step=1)
-                product_col = st.number_input("产品名称列索引", min_value=0, value=2, step=1)
-                qty_col = st.number_input("数量列索引", min_value=0, value=3, step=1)
-                price_col = st.number_input("单价列索引", min_value=0, value=4, step=1)
-                amount_col = st.number_input("金额列索引", min_value=0, value=5, step=1)
-                note_col = st.number_input("备注列索引（-1表示无）", min_value=-1, value=-1, step=1)
-
-            if st.button("🔄 使用手动配置重新提取"):
-                config = {
-                    'header_row': header_row,
-                    'data_start_row': data_start_row,
-                    'date_col': date_col if date_col >= 0 else None,
-                    'name_col': name_col,
-                    'batch_col': batch_col if batch_col >= 0 else None,
-                    'product_col': product_col,
-                    'qty_col': qty_col,
-                    'price_col': price_col,
-                    'amount_col': amount_col,
-                    'note_col': note_col if note_col >= 0 else None
-                }
-                if not uploaded_files:
-                    st.warning("请先上传文件。")
-                else:
-                    all_data_manual = []
-                    try:
-                        # 处理第一个文件（可扩展为选择文件）
-                        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
-                            tmp.write(uploaded_files[0].getbuffer())
-                            tmp_path = tmp.name
-                        wb = load_workbook(tmp_path, data_only=True)
-                        for sheet_name in wb.sheetnames:
-                            ws = wb[sheet_name]
-                            extractor = WorkshopDataExtractor(sheet_name)
-                            extractor.extract(ws, all_data_manual, manual_config=config)
-                        wb.close()
-                        os.unlink(tmp_path)
-                    except Exception as e:
-                        st.error(f"手动提取出错: {e}")
-                    if all_data_manual:
-                        st.success(f"手动提取成功，共 {len(all_data_manual)} 条记录。")
-                        st.session_state.all_data = all_data_manual
-                        output_buffer = save_to_output(all_data_manual)
-                        st.download_button(
-                            label="📥 下载手动提取结果",
-                            data=output_buffer,
-                            file_name="手动提取结果.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-                    else:
-                        st.warning("手动提取未获得数据，请检查配置。")
-        else:
-            st.info("请先上传文件以加载预览数据。")
+                st.warning("⚠️ 未能提取到任何数据，请检查文件格式。")
 
 if __name__ == "__main__":
     main()
