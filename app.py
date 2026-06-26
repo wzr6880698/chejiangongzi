@@ -73,7 +73,7 @@ class DataValidator:
 
 
 # ============================
-# 核心提取器（独立姓名列、水平并排支持）
+# 核心提取器
 # ============================
 class WorkshopDataExtractor:
     def __init__(self, sheet_name):
@@ -144,6 +144,18 @@ class WorkshopDataExtractor:
         for r, c in quantity_cells:
             rows_with_q[r].append(c)
 
+        # 先找出所有"姓名"列的位置（按行分组，但只取表头行所在行）
+        name_positions = {}  # 行号 -> 列号列表
+        for r in range(1, max_row + 1):
+            for c in range(1, max_col + 1):
+                cell = ws.cell(r, c)
+                if cell.value and isinstance(cell.value, str):
+                    val = cell.value.strip()
+                    if val == "姓名":
+                        if r not in name_positions:
+                            name_positions[r] = []
+                        name_positions[r].append(c)
+
         for header_row, q_cols in sorted(rows_with_q.items()):
             # ---- 按列距离聚类 ----
             q_cols_sorted = sorted(q_cols)
@@ -161,49 +173,37 @@ class WorkshopDataExtractor:
             for cluster in clusters:
                 min_col = min(cluster)
                 max_col_cluster = max(cluster)
+                # 计算簇中心列
+                center_col = (min_col + max_col_cluster) // 2
 
-                # ---- 独立查找姓名列（精确搜索） ----
+                # ---- 选择最近的"姓名"列 ----
                 name_col = None
-                # 首先在簇列范围左右扩展5列内搜索
-                left_bound = max(1, min_col - 5)
-                right_bound = min(max_col, max_col_cluster + 5)
-                for r in range(header_row, max(1, header_row - 5), -1):
-                    for c in range(left_bound, right_bound + 1):
-                        cell = ws.cell(r, c)
-                        if cell.value and isinstance(cell.value, str):
-                            val = cell.value.strip()
-                            if val == "姓名":
-                                name_col = c
-                                break
-                    if name_col:
-                        break
-                # 若未找到，尝试在左邻列（min_col-1）
-                if name_col is None and min_col - 1 >= 1:
-                    for r in range(header_row, max(1, header_row - 5), -1):
-                        cell = ws.cell(r, min_col - 1)
-                        if cell.value and isinstance(cell.value, str) and cell.value.strip() == "姓名":
-                            name_col = min_col - 1
-                            break
-                # 若还未找到，尝试在右邻列（max_col_cluster+1）
-                if name_col is None and max_col_cluster + 1 <= max_col:
-                    for r in range(header_row, max(1, header_row - 5), -1):
-                        cell = ws.cell(r, max_col_cluster + 1)
-                        if cell.value and isinstance(cell.value, str) and cell.value.strip() == "姓名":
-                            name_col = max_col_cluster + 1
-                            break
-                # 最后，若仍找不到，回退到全局搜索，但限定列范围在块附近（左右10列）
+                # 获取当前表头行上的所有姓名列
+                name_cols_in_row = name_positions.get(header_row, [])
+                if name_cols_in_row:
+                    # 计算距离，选择最近的
+                    min_dist = float('inf')
+                    for nc in name_cols_in_row:
+                        dist = abs(nc - center_col)
+                        if dist < min_dist:
+                            min_dist = dist
+                            name_col = nc
+                # 如果当前行没有姓名，尝试向上找一行
                 if name_col is None:
-                    left_global = max(1, min_col - 10)
-                    right_global = min(max_col, max_col_cluster + 10)
-                    for r in range(header_row, max(1, header_row - 5), -1):
-                        for c in range(left_global, right_global + 1):
-                            cell = ws.cell(r, c)
-                            if cell.value and isinstance(cell.value, str) and cell.value.strip() == "姓名":
-                                name_col = c
-                                break
-                        if name_col:
-                            break
-                # 如果仍然没有，默认B列
+                    for r in range(header_row - 1, max(1, header_row - 3), -1):
+                        if r in name_positions:
+                            name_cols = name_positions[r]
+                            if name_cols:
+                                # 选择最近的
+                                min_dist = float('inf')
+                                for nc in name_cols:
+                                    dist = abs(nc - center_col)
+                                    if dist < min_dist:
+                                        min_dist = dist
+                                        name_col = nc
+                                if name_col is not None:
+                                    break
+                # 如果还是没有，默认B列
                 if name_col is None:
                     name_col = 2
 
@@ -336,7 +336,7 @@ class WorkshopDataExtractor:
 
                 blocks.append({
                     'header_row': header_row,
-                    'name_col': name_col,  # 每个块独立姓名列
+                    'name_col': name_col,
                     'product_blocks': product_blocks
                 })
 
@@ -482,14 +482,14 @@ def save_to_output(data_list):
 # Streamlit 界面
 # ============================
 def main():
-    st.set_page_config(page_title="车间日报提取工具（独立块姓名列）", layout="wide")
-    st.title("🏭 车间生产日报数据处理系统（独立块姓名列）")
+    st.set_page_config(page_title="车间日报提取工具（最近姓名列）", layout="wide")
+    st.title("🏭 车间生产日报数据处理系统（最近姓名列）")
     st.markdown("""
     **使用说明：**
     - 上传车间日报表文件（支持 .xlsx, .xls）。
-    - 系统自动识别所有数据块，每个块独立查找自己的“姓名”列。
-    - 无论数据块垂直堆叠还是水平并排，都能正确提取。
-    - 支持一行、两行、三行及任意行表头。
+    - 系统自动识别所有数据块，并为每个块选择距离其“数量”列最近的“姓名”列。
+    - 完美支持水平并排的一行表头块。
+    - 兼容二行、三行及任意行表头。
     - 支持多文件批量处理，结果汇总下载。
     """)
     st.markdown("---")
