@@ -482,14 +482,12 @@ def save_to_output(data_list):
 # Streamlit 界面
 # ============================
 def main():
-    st.set_page_config(page_title="车间日报提取工具（最近姓名列）", layout="wide")
-    st.title("🏭 车间生产日报数据处理系统（最近姓名列）")
+    st.set_page_config(page_title="车间日报提取工具（多表头智能识别）", layout="wide")
+    st.title("🏭 车间生产日报数据处理系统（多表头智能识别）")
     st.markdown("""
     **使用说明：**
-    - 上传车间日报表文件（支持 .xlsx, .xls）。
-    - 系统自动识别所有数据块，并为每个块选择距离其“数量”列最近的“姓名”列。
-    - 完美支持水平并排的一行表头块。
-    - 兼容二行、三行及任意行表头。
+    - 上传或拖拽工资记录文件（支持 .xlsx）。
+    - 
     - 支持多文件批量处理，结果汇总下载。
     """)
     st.markdown("---")
