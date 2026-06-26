@@ -73,7 +73,7 @@ class DataValidator:
 
 
 # ============================
-# 核心提取器（支持水平并排块）
+# 核心提取器（独立姓名列、水平并排支持）
 # ============================
 class WorkshopDataExtractor:
     def __init__(self, sheet_name):
@@ -163,25 +163,37 @@ class WorkshopDataExtractor:
                 max_col_cluster = max(cluster)
                 center_col = (min_col + max_col_cluster) // 2
 
-                # ---- 查找姓名列（在整个表头区域附近） ----
+                # ---- 独立查找姓名列（在当前簇范围内搜索） ----
                 name_col = None
+                search_radius_col_name = 3  # 在簇左右扩展3列
                 for r in range(header_row, max(1, header_row - 5), -1):
-                    for c in range(1, max_col + 1):
+                    for c in range(max(1, min_col - search_radius_col_name),
+                                   min(max_col, max_col_cluster + search_radius_col_name + 1)):
                         cell = ws.cell(r, c)
                         if cell.value and isinstance(cell.value, str) and cell.value.strip() == "姓名":
                             name_col = c
                             break
                     if name_col:
                         break
+                # 如果簇内未找到，回退到全局搜索
+                if name_col is None:
+                    for r in range(header_row, max(1, header_row - 5), -1):
+                        for c in range(1, max_col + 1):
+                            cell = ws.cell(r, c)
+                            if cell.value and isinstance(cell.value, str) and cell.value.strip() == "姓名":
+                                name_col = c
+                                break
+                        if name_col:
+                            break
                 if name_col is None:
                     name_col = 2  # 默认B列
 
-                # ---- 为当前块搜索公共元数据 ----
+                # ---- 为当前块搜索公共元数据（日期、批次号、产品名称） ----
                 search_radius_row = 3
                 search_radius_col = 5
                 block_metadata = {'date': None, 'batch': None, 'product': None}
 
-                # 搜索日期（围绕簇的列范围）
+                # 搜索日期
                 for r in range(header_row - search_radius_row, header_row + search_radius_row + 1):
                     if r < 1 or r > max_row:
                         continue
@@ -305,7 +317,7 @@ class WorkshopDataExtractor:
 
                 blocks.append({
                     'header_row': header_row,
-                    'name_col': name_col,
+                    'name_col': name_col,  # 每个块独立姓名列
                     'product_blocks': product_blocks
                 })
 
@@ -451,13 +463,13 @@ def save_to_output(data_list):
 # Streamlit 界面
 # ============================
 def main():
-    st.set_page_config(page_title="车间日报提取工具（自由画布兼容）", layout="wide")
-    st.title("🏭 车间生产日报数据处理系统（自由画布兼容）")
+    st.set_page_config(page_title="车间日报提取工具（独立块姓名列）", layout="wide")
+    st.title("🏭 车间生产日报数据处理系统（独立块姓名列）")
     st.markdown("""
     **使用说明：**
     - 上传车间日报表文件（支持 .xlsx, .xls）。
-    - 系统自动识别所有数据块，无论它们垂直排列还是水平并排。
-    - 每个块独立提取元数据（日期、批次号、产品名称、姓名列）。
+    - 系统自动识别所有数据块，每个块独立查找自己的“姓名”列。
+    - 无论数据块垂直堆叠还是水平并排，都能正确提取。
     - 支持一行、两行、三行及任意行表头。
     - 支持多文件批量处理，结果汇总下载。
     """)
