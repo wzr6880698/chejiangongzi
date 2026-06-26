@@ -73,7 +73,7 @@ class DataValidator:
 
 
 # ============================
-# 核心提取器
+# 核心提取器（支持水平并排块）
 # ============================
 class WorkshopDataExtractor:
     def __init__(self, sheet_name):
@@ -95,8 +95,8 @@ class WorkshopDataExtractor:
         """
         根据关键词所在的单元格，智能获取其对应的值。
         策略：
-        1. 检查右侧单元格，若右侧非空且不是另一个标签，则取右侧。
-        2. 否则，检查下方单元格，取下方。
+        1. 检查右侧单元格，若右侧非空且不是另一个标签，则取右侧（二行/三行表头）。
+        2. 否则，检查下方单元格，取下方（一行表头）。
         """
         label_keywords = {
             "批次号", "批号", "产品名称", "品名", "日期", "生产日期",
@@ -128,6 +128,7 @@ class WorkshopDataExtractor:
         max_row = ws.max_row
         max_col = ws.max_column
 
+        # 找出所有"数量"单元格
         quantity_cells = []
         for r in range(1, max_row + 1):
             for c in range(1, max_col + 1):
@@ -138,156 +139,175 @@ class WorkshopDataExtractor:
         if not quantity_cells:
             return []
 
+        # 按行分组
         rows_with_q = defaultdict(list)
         for r, c in quantity_cells:
             rows_with_q[r].append(c)
 
         for header_row, q_cols in sorted(rows_with_q.items()):
-            # 查找姓名列
-            name_col = None
-            for r in range(header_row, max(1, header_row - 5), -1):
-                for c in range(1, max_col + 1):
-                    cell = ws.cell(r, c)
-                    if cell.value and isinstance(cell.value, str) and cell.value.strip() == "姓名":
-                        name_col = c
+            # ---- 按列距离聚类 ----
+            q_cols_sorted = sorted(q_cols)
+            clusters = []
+            current_cluster = [q_cols_sorted[0]]
+            for i in range(1, len(q_cols_sorted)):
+                if q_cols_sorted[i] - q_cols_sorted[i - 1] <= 5:  # 列间距阈值5
+                    current_cluster.append(q_cols_sorted[i])
+                else:
+                    clusters.append(current_cluster)
+                    current_cluster = [q_cols_sorted[i]]
+            clusters.append(current_cluster)
+
+            # 对每个簇生成一个独立块
+            for cluster in clusters:
+                min_col = min(cluster)
+                max_col_cluster = max(cluster)
+                center_col = (min_col + max_col_cluster) // 2
+
+                # ---- 查找姓名列（在整个表头区域附近） ----
+                name_col = None
+                for r in range(header_row, max(1, header_row - 5), -1):
+                    for c in range(1, max_col + 1):
+                        cell = ws.cell(r, c)
+                        if cell.value and isinstance(cell.value, str) and cell.value.strip() == "姓名":
+                            name_col = c
+                            break
+                    if name_col:
                         break
-                if name_col:
-                    break
-            if name_col is None:
-                name_col = 2
+                if name_col is None:
+                    name_col = 2  # 默认B列
 
-            # 公共元数据
-            search_radius_row = 3
-            search_radius_col = 5
-            block_metadata = {'date': None, 'batch': None, 'product': None}
+                # ---- 为当前块搜索公共元数据 ----
+                search_radius_row = 3
+                search_radius_col = 5
+                block_metadata = {'date': None, 'batch': None, 'product': None}
 
-            # 日期
-            for r in range(header_row - search_radius_row, header_row + search_radius_row + 1):
-                if r < 1 or r > max_row:
-                    continue
-                for c in range(1, max_col + 1):
-                    cell = ws.cell(r, c)
-                    if cell.value and isinstance(cell.value, str):
-                        val = cell.value.strip()
-                        if val in ["日期", "生产日期"]:
-                            value_str = self._get_value_from_label(ws, r, c, max_row, max_col)
-                            if value_str:
-                                parsed = DateParser.parse(value_str)
-                                if parsed:
-                                    block_metadata['date'] = parsed
-                                    break
-                    if block_metadata['date']:
-                        break
-                if block_metadata['date']:
-                    break
-
-            if not block_metadata['date']:
+                # 搜索日期（围绕簇的列范围）
                 for r in range(header_row - search_radius_row, header_row + search_radius_row + 1):
                     if r < 1 or r > max_row:
                         continue
-                    for c in range(1, 6):
+                    for c in range(max(1, min_col - search_radius_col),
+                                   min(max_col, max_col_cluster + search_radius_col + 1)):
                         cell = ws.cell(r, c)
-                        if cell.value:
-                            parsed = DateParser.parse(cell.value)
-                            if parsed:
-                                block_metadata['date'] = parsed
-                                break
+                        if cell.value and isinstance(cell.value, str):
+                            val = cell.value.strip()
+                            if val in ["日期", "生产日期"]:
+                                value_str = self._get_value_from_label(ws, r, c, max_row, max_col)
+                                if value_str:
+                                    parsed = DateParser.parse(value_str)
+                                    if parsed:
+                                        block_metadata['date'] = parsed
+                                        break
                     if block_metadata['date']:
                         break
 
-            # 批次号
-            for r in range(header_row - search_radius_row, header_row + search_radius_row + 1):
-                if r < 1 or r > max_row:
-                    continue
-                for c in range(1, max_col + 1):
-                    cell = ws.cell(r, c)
-                    if cell.value and isinstance(cell.value, str):
-                        val = cell.value.strip()
-                        if val in ["批次号", "批号"]:
-                            value_str = self._get_value_from_label(ws, r, c, max_row, max_col)
-                            if value_str:
-                                block_metadata['batch'] = value_str
-                                break
+                if not block_metadata['date']:
+                    # 尝试从A列或左上角找
+                    for r in range(header_row - search_radius_row, header_row + search_radius_row + 1):
+                        if r < 1 or r > max_row:
+                            continue
+                        for c in range(1, 6):
+                            cell = ws.cell(r, c)
+                            if cell.value:
+                                parsed = DateParser.parse(cell.value)
+                                if parsed:
+                                    block_metadata['date'] = parsed
+                                    break
+                        if block_metadata['date']:
+                            break
+
+                # 搜索批次号
+                for r in range(header_row - search_radius_row, header_row + search_radius_row + 1):
+                    if r < 1 or r > max_row:
+                        continue
+                    for c in range(max(1, min_col - search_radius_col),
+                                   min(max_col, max_col_cluster + search_radius_col + 1)):
+                        cell = ws.cell(r, c)
+                        if cell.value and isinstance(cell.value, str):
+                            val = cell.value.strip()
+                            if val in ["批次号", "批号"]:
+                                value_str = self._get_value_from_label(ws, r, c, max_row, max_col)
+                                if value_str:
+                                    block_metadata['batch'] = value_str
+                                    break
                     if block_metadata['batch']:
                         break
-                if block_metadata['batch']:
-                    break
 
-            # 产品名称
-            for r in range(header_row - search_radius_row, header_row + search_radius_row + 1):
-                if r < 1 or r > max_row:
-                    continue
-                for c in range(1, max_col + 1):
-                    cell = ws.cell(r, c)
-                    if cell.value and isinstance(cell.value, str):
-                        val = cell.value.strip()
-                        if val in ["产品名称", "品名"]:
-                            value_str = self._get_value_from_label(ws, r, c, max_row, max_col)
-                            if value_str:
-                                block_metadata['product'] = value_str
-                                break
+                # 搜索产品名称
+                for r in range(header_row - search_radius_row, header_row + search_radius_row + 1):
+                    if r < 1 or r > max_row:
+                        continue
+                    for c in range(max(1, min_col - search_radius_col),
+                                   min(max_col, max_col_cluster + search_radius_col + 1)):
+                        cell = ws.cell(r, c)
+                        if cell.value and isinstance(cell.value, str):
+                            val = cell.value.strip()
+                            if val in ["产品名称", "品名"]:
+                                value_str = self._get_value_from_label(ws, r, c, max_row, max_col)
+                                if value_str:
+                                    block_metadata['product'] = value_str
+                                    break
                     if block_metadata['product']:
                         break
-                if block_metadata['product']:
-                    break
 
-            # 处理每个数量列
-            product_blocks = []
-            for q_col in sorted(q_cols):
-                batch = block_metadata['batch'] if block_metadata['batch'] is not None else "0"
-                product = block_metadata['product'] if block_metadata['product'] is not None else f"产品{q_col}"
-                date_val = block_metadata['date']
+                # ---- 处理簇中的每个数量列 ----
+                product_blocks = []
+                for q_col in cluster:
+                    batch = block_metadata['batch'] if block_metadata['batch'] is not None else "0"
+                    product = block_metadata['product'] if block_metadata['product'] is not None else f"产品{q_col}"
+                    date_val = block_metadata['date']
 
-                if block_metadata['batch'] is None:
-                    for r in range(header_row - 2, header_row + 3):
-                        if r < 1 or r > max_row:
-                            continue
-                        for c in range(max(1, q_col - 2), min(max_col, q_col + 3) + 1):
-                            cell = ws.cell(r, c)
-                            if cell.value and isinstance(cell.value, str):
-                                val = cell.value.strip()
-                                if val in ["批次号", "批号"]:
-                                    value_str = self._get_value_from_label(ws, r, c, max_row, max_col)
-                                    if value_str:
-                                        batch = value_str
-                                        break
-                        if batch != "0":
-                            break
+                    # 如果公共批次号缺失，局部搜索
+                    if block_metadata['batch'] is None:
+                        for r in range(header_row - 2, header_row + 3):
+                            if r < 1 or r > max_row:
+                                continue
+                            for c in range(max(1, q_col - 2), min(max_col, q_col + 3) + 1):
+                                cell = ws.cell(r, c)
+                                if cell.value and isinstance(cell.value, str):
+                                    val = cell.value.strip()
+                                    if val in ["批次号", "批号"]:
+                                        value_str = self._get_value_from_label(ws, r, c, max_row, max_col)
+                                        if value_str:
+                                            batch = value_str
+                                            break
+                            if batch != "0":
+                                break
 
-                if block_metadata['product'] is None:
-                    for r in range(header_row - 2, header_row + 3):
-                        if r < 1 or r > max_row:
-                            continue
-                        for c in range(max(1, q_col - 2), min(max_col, q_col + 3) + 1):
-                            cell = ws.cell(r, c)
-                            if cell.value and isinstance(cell.value, str):
-                                val = cell.value.strip()
-                                if val in ["产品名称", "品名"]:
-                                    value_str = self._get_value_from_label(ws, r, c, max_row, max_col)
-                                    if value_str:
-                                        product = value_str
-                                        break
-                        if product != f"产品{q_col}":
-                            break
+                    # 如果公共产品名缺失，局部搜索
+                    if block_metadata['product'] is None:
+                        for r in range(header_row - 2, header_row + 3):
+                            if r < 1 or r > max_row:
+                                continue
+                            for c in range(max(1, q_col - 2), min(max_col, q_col + 3) + 1):
+                                cell = ws.cell(r, c)
+                                if cell.value and isinstance(cell.value, str):
+                                    val = cell.value.strip()
+                                    if val in ["产品名称", "品名"]:
+                                        value_str = self._get_value_from_label(ws, r, c, max_row, max_col)
+                                        if value_str:
+                                            product = value_str
+                                            break
+                            if product != f"产品{q_col}":
+                                break
 
-                price_col = q_col + 1
-                amount_col = q_col + 2
-                note_col = q_col + 3
-                product_blocks.append({
-                    'q_col': q_col,
-                    'price_col': price_col,
-                    'amount_col': amount_col,
-                    'note_col': note_col,
-                    'batch': batch,
-                    'product': product,
-                    'date': date_val
+                    price_col = q_col + 1
+                    amount_col = q_col + 2
+                    note_col = q_col + 3
+                    product_blocks.append({
+                        'q_col': q_col,
+                        'price_col': price_col,
+                        'amount_col': amount_col,
+                        'note_col': note_col,
+                        'batch': batch,
+                        'product': product,
+                        'date': date_val
+                    })
+
+                blocks.append({
+                    'header_row': header_row,
+                    'name_col': name_col,
+                    'product_blocks': product_blocks
                 })
-
-            blocks.append({
-                'header_row': header_row,
-                'name_col': name_col,
-                'product_blocks': product_blocks
-            })
 
         return blocks
 
@@ -298,6 +318,7 @@ class WorkshopDataExtractor:
 
         start_row = header_row + 1
         end_row = ws.max_row
+        # 查找下一个表头行（含“数量”的行），作为结束
         for r in range(start_row, ws.max_row + 1):
             for c in range(1, ws.max_column + 1):
                 cell = ws.cell(r, c)
@@ -430,15 +451,14 @@ def save_to_output(data_list):
 # Streamlit 界面
 # ============================
 def main():
-    st.set_page_config(page_title="车间日报提取工具（智能值定位）", layout="wide")
-    st.title("🏭 车间生产日报数据处理系统（智能值定位）")
+    st.set_page_config(page_title="车间日报提取工具（自由画布兼容）", layout="wide")
+    st.title("🏭 车间生产日报数据处理系统（自由画布兼容）")
     st.markdown("""
     **使用说明：**
     - 上传车间日报表文件（支持 .xlsx, .xls）。
-    - 系统自动识别数据块，寻找关键词后：
-        - 若右侧单元格不是标签，则取右侧值（二行/三行表头）；
-        - 否则取下方单元格值（一行表头）。
-    - 兼容一行、两行、三行及任意行表头。
+    - 系统自动识别所有数据块，无论它们垂直排列还是水平并排。
+    - 每个块独立提取元数据（日期、批次号、产品名称、姓名列）。
+    - 支持一行、两行、三行及任意行表头。
     - 支持多文件批量处理，结果汇总下载。
     """)
     st.markdown("---")
